@@ -1,0 +1,427 @@
+#####step 1.Basic graphics and classification visualization
+
+library(gghalves)
+library(sqldf)
+library(dplyr)
+
+setwd("C:\\Users\\Administrator\\Desktop\\dataAnlyze\\SEPSIS\\mr_injury")
+getwd()
+rm(list = ls())
+
+patient_mimic4<- read.csv ("patient-mimic4-mice.csv",encoding="UTF-8",header = TRUE)
+patient_mimic3<- read.csv ("patient-mimic3-mice.csv",encoding="UTF-8",header = TRUE)
+mimic3s<- read.csv ("icustays3s.csv",encoding="UTF-8",header = TRUE)
+patient_mimic3 <- sqldf('select * from patient_mimic3 where icustay_id in (select icustay_id from mimic3s)')
+patient_eicu<- read.csv ("patient-eicu-mice.csv",encoding="UTF-8",header = TRUE)
+patient_umc<- read.csv ("patient-umc-mice.csv",encoding="UTF-8",header = TRUE)
+patient_sic<- read.csv ("patient-sic-mice.csv",encoding="UTF-8",header = TRUE)
+patient_inspare<- read.csv ("patient-inspare-mice.csv",encoding="UTF-8",header = TRUE)
+
+data <- sqldf("select stay_id,troponin_t,case when exp_type=0 then 'a'  when exp_type=1 then 'b' 
+                                              when exp_type=2 then 'c'  when exp_type=3 then 'd' 
+                                              when exp_type=4 then 'e'
+                                         else 'f' end as  type
+                           from patient_mimic4  where troponin_t is not null and troponin_t<=1 and exp_type in (0,5)
+           ")
+ggplot(data, aes(x = type, y = troponin_t, fill=type)) +
+  geom_violin(scale="width", adjust=0.5) + 
+  geom_boxplot(width = 0.1,position = position_nudge(x =0, y = 0))+
+  scale_fill_manual(values = c("#0CB9C1","#bf0022"))+
+  scale_color_manual(values = c("#0CB9C1","#bf0022"))+
+  theme_classic()
+a<-sqldf("select troponin_t from data where type='a' ")
+f<-sqldf("select troponin_t from data where type='f' ")
+wilcox.test(a$troponin_t,f$troponin_t)
+
+data <- sqldf("select troponin_i,case when exp_type=0 then 'a'  when exp_type=1 then 'b' 
+                                              when exp_type=2 then 'c'  when exp_type=3 then 'd' 
+                                              when exp_type=4 then 'e'
+                                         else 'f' end as  type
+                           from patient_eicu  where troponin_i is not null and troponin_i<=5 and exp_type in (0,5)
+           ")
+
+#箱式图
+ggplot(data, aes(x = type, y = troponin_i, fill=type)) +
+  geom_violin(scale="width", adjust=0.5) + 
+  geom_boxplot(width = 0.1,position = position_nudge(x =0, y = 0))+
+  scale_fill_manual(values = c("#0CB9C1","#bf0022"))+
+  scale_color_manual(values = c("#0CB9C1","#bf0022"))+
+  theme_classic()
+a<-sqldf("select troponin_i from data where type='a' ")
+f<-sqldf("select troponin_i from data where type='f' ")
+wilcox.test(a$troponin_i,f$troponin_i)
+
+ggplot(data, aes(x = type, y = troponin_t)) +
+  geom_half_violin(
+    aes(fill = type), 
+    side = 'r', 
+    position = position_nudge(x = .20, y = 0), 
+    adjust = 1/2) +
+  geom_boxplot(width = 0.1,
+               position = position_nudge(x = .20, y = 0)) +
+  geom_point(aes(colour =type),position = position_jitter(width = .12),  size = .1  ) +
+  scale_fill_manual(values = c("#0CB9C1","#F85A40","#7552CC","#037EF3","#e80088","#bf0022"))+
+  scale_color_manual(values = c("#0CB9C1","#F85A40","#7552CC","#037EF3","#e80088","#bf0022"))+
+  theme_classic() 
+##........省略重复作图步骤
+
+##step 2.Visualization and interpolation of missing values
+library(tableone)
+library(SparseM)
+library(survival)
+library(lattice) #调入多重插补
+library(MASS)
+library(nnet)
+library(mice)
+library(VIM)
+library(sqldf)
+library(tidyr)
+library(tidyverse)
+rm(list = ls())
+data_raw<- read.csv ("patient-mimic4.csv",encoding="UTF-8",header = TRUE)
+colnames(data_raw)
+vars <- c("age", "male","bmi", "charlson","sofa" ,"sapsii" , "ph_min" ,"po2_min" ,"pco2_max" ,"lactate_max" ,"wbc_max", "hb_min" ,"plt_min","creatinine_max","inr_max" )
+data <- data_raw[vars]
+missvars  <- a[["missings"]][a[["missings"]][["Count"]]>0, ] #%>% select(Variable) %>%  as.vector()
+dev.off()
+dev.new()
+aggr(data[missvars$Variable], col=c( "#0666B1","#ED1B3A"), bars = T,
+     numbers=TRUE, prop =T,
+     sortVars=TRUE, cex.lab = 1.2,
+     labels=names(data[missvars$Variable]), 
+     cex.axis=.7, varheight=T,
+     gap=1, only.miss=T,
+     ylab=c("Histogram of missing data","Distribution of missing data"))
+data_raw<- read.csv ("daily-mimic3.csv",encoding="UTF-8",header = TRUE)
+colnames(data_raw)
+vars <- c( "sbp_twa","dbp_twa","map_twa","heart_rate_twa","resp_rate_twa","temperature_twa","spo2_twa" ,"uo" ,"vaso" , "rrt","vent","heart_rate_exposure_percent", "dbp_exposure_percent" )
+data <- sqldf('select * from data_raw where day=1')
+#插补
+data_mice<-mice(data[vars],m=50,defaultMethod = c("pmm","pmm","polyreg"),seed = 123)
+summary(data_mice)
+aa <- complete(data_mice)
+aa$icustay_id <-data$icustay_id
+aa$day <-data$day
+aa<-    sqldf('with a0 as (
+
+            select icustay_id,day, sbp_twa, dbp_twa ,map_twa, heart_rate_twa, resp_rate_twa ,temperature_twa ,spo2_twa ,uo , vaso ,rrt, vent from aa 
+            union
+            select icustay_id,day, sbp_twa, dbp_twa ,map_twa, heart_rate_twa, resp_rate_twa ,temperature_twa ,spo2_twa ,uo , vaso ,rrt, vent from data_raw where day>1
+            )
+            select * from a0 order by icustay_id,day
+          ')
+##........省略重复步骤
+
+##step 3.Modeling
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(survival)
+library(mgcv)
+library(pammtools)
+library(survminer)
+library(sqldf)
+library(magrittr)
+library(pROC) 
+rm(list = ls())
+library(cowplot)
+patient<- read.csv ("patient.csv",encoding="UTF-8",header = TRUE)
+daily<- read.csv ("daily.csv",encoding="UTF-8",header = TRUE)
+data_ped <- as_ped(
+  data = list(patient, daily),
+  formula = Surv(sur_28day, death_28day) ~ age +male+ bmi+age+ male+bmi+ charlson+sofa +sapsii + ph_min +po2_min +pco2_max +lactate_max +wbc_max+ hb_min +plt_min+creatinine_max+inr_max+double_exposure
+  + concurrent(sbp_twa, dbp_twa ,map_twa, heart_rate_twa, resp_rate_twa ,temperature_twa ,spo2_twa ,uo , vaso ,rrt, vent,heart_rate_exposure_percent ,dbp_exposure_percent, tz_var = "day"),
+  id = "stay_id") %>%
+  mutate(logt20 = log(tstart + (tstart - tend) / 2 + 20))
+pam_heart_rate <- gam(
+  formula = ped_status ~ male+bmi+sapsii + ph_min  +lactate_max + hb_min +inr_max
+  +sbp_twa+dbp_twa +spo2_twa +uo+vaso +rrt+ vent
+  + te(tend,heart_rate_twa),
+  data   = data_ped,
+  family = binomial(),reference = sample_info(data_ped),
+  offset = offset)
+summary(pam_heart_rate)
+heart_rate_gg <- gg_tensor(pam_heart_rate, ci = F) +
+  xlab("Days after admission") + ylab("Time dependent HR (bpm)")
+heart_rate_gg
+pam_heart_rate_exposure_percent <- gam(
+  formula = ped_status ~ male+bmi+sapsii + ph_min  +lactate_max + hb_min +inr_max
+  +sbp_twa+dbp_twa +spo2_twa +uo+vaso +rrt+ vent
+  + te(tend,heart_rate_exposure_percent),
+  data   = data_ped,
+  family = binomial(),reference = sample_info(data_ped),
+  offset = offset)
+summary(pam_heart_rate_exposure_percent)
+heart_rate_exposure_percent_gg <- gg_tensor(pam_heart_rate_exposure_percent, ci = F) +
+  xlab("Days after admission") + ylab("Time dependent heart_rate_exposure_percent (/min)")
+heart_rate_exposure_percent_gg
+pam_dbp <- gam(
+  formula = ped_status ~ male+bmi +sapsii + ph_min  +lactate_max + hb_min +inr_max
+  +sbp_twa+heart_rate_twa +spo2_twa +uo+vaso +rrt+ vent
+  + te(tend,dbp_twa),
+  data   = data_ped,
+  family = binomial(),reference = sample_info(data_ped),
+  offset = offset)
+summary(pam_dbp)
+dbp_gg <- gg_tensor(pam_dbp, ci = F) +
+  xlab("Days after admission") + ylab("Time dependent DBP (mmHg)")
+dbp_gg
+pam_dbp_exposure_percent <- gam(
+  formula = ped_status ~ male+bmi+sapsii + ph_min  +lactate_max + hb_min +inr_max
+  +sbp_twa+dbp_twa +spo2_twa +uo+vaso +rrt+ vent
+  + te(tend,dbp_exposure_percent),
+  data   = data_ped,
+  family = binomial(),reference = sample_info(data_ped),
+  offset = offset)
+summary(pam_dbp_exposure_percent)
+dbp_exposure_percent_gg <- gg_tensor(pam_dbp_exposure_percent, ci = F) +
+  xlab("Days after admission") + ylab("Time dependent dbp_exposure_percent (/min)")
+dbp_exposure_percent_gg
+
+p_total<-plot_grid(heart_rate_gg,dbp_gg,ncol=2,labels=LETTERS[1:2],align=c("v","h"))
+p_total
+##........省略重复步骤
+
+##step 4.Validation and Visualization
+rm(list = ls())
+fitall <- survfit(Surv(sur_28day,death_28day) ~exp_type, data = data) 
+s <- ggsurvplot(fitall, data = data,
+                main = 'Cumulative hazard',
+                surv.median.line = "hv",
+                palette=c( "#0CB9C1","#F85A40","#7552CC","#037EF3","#e80088","#bf0022"), 
+                legend.labs=c("H0D0","H1D0","H0D1","H0D-1","H1D1","H1D-1"), #标签
+                legend.title="Groups",
+                title="Overall survival", #标题
+                ylab="Cumulative hazard (percentage)",xlab = " Time (Days)", #更改横纵坐标
+                censor.shape = 3,censor.size = 3,
+                conf.int = T, 
+                break.x.by = 4,
+                break.y.by = 0.1,#坐标间隔
+                risk.table = T,tables.height = 0.25,
+                tables.theme = theme_survminer(),
+                ggtheme = theme_bw(),
+                pval = T,pval.method=T,fun = 'event',
+                axes=F)
+s$plot <- s$plot+ 
+  theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank())+ylim(0,0.5)
+s
+mydata <- read.csv ("forest-line.csv",header = TRUE)
+#mydata$P_value <- ifelse(mydata$P_value=='<0.001',0.001,mydata$P_value )
+
+p1<-ggplot(mydata,aes(x=OR,y=seq, color=Type))+
+  theme_bw()+
+  theme(legend.position = "none")+ 
+  geom_point()+scale_x_continuous(limits = c(0,6.0),breaks = c(0,1,2,3,4,5,6));p1
+
+p2<- p1+ geom_rect(aes(xmin = -Inf, ymin = 0.9,
+                       xmax = Inf, ymax = 4.1),
+                   fill = "#BFD6ED", color = "#BFD6ED", size =1.5)+
+  geom_rect(aes(xmin = -Inf, ymin =4.2,
+                xmax = Inf, ymax = 8.1),
+            fill = "#ff5e86", color = "#ff5e86", size =1.5)+
+  geom_rect(aes(xmin = -Inf, ymin =8.2,
+                xmax = Inf, ymax = 13.1),
+            fill = "#82a2ff", color = "#82a2ff", size =1.5);p2
+p3<- p2+geom_point(size=3)+
+  scale_fill_manual(values = c("#0CB9C1", "#0CB9C1", "#77621D",
+                               "#5F8744", "#1D7CBA", "#828282"))+
+  scale_color_manual(values = c("#0CB9C1", "#0CB9C1", "#77621D",
+                                "#5F8744", "#1D7CBA", "#828282"))+
+  geom_curve(aes(x = mydata$LCI[1], y = 1, xend = mydata$UCI[1], yend = 1),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[1],y= 1 , label=paste(mydata$Items[1],"N",mydata$SNP[1],"P value",mydata$P_value[1]),size=4)+
+  geom_curve(aes(x = mydata$LCI[2], y = 2, xend = mydata$UCI[2], yend = 2),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[2],y= 2 , label=paste(mydata$Items[2],"N",mydata$SNP[2],"P value",mydata$P_value[2]),size=4)+
+  geom_curve(aes(x = mydata$LCI[3], y = 3, xend = mydata$UCI[3], yend = 3),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[3],y= 3 , label=paste(mydata$Items[3],"N",mydata$SNP[3],"P value",mydata$P_value[3]),size=4)+
+  geom_curve(aes(x = mydata$LCI[4], y = 4, xend = mydata$UCI[4], yend = 4),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[4],y= 4 , label=paste(mydata$Items[4],"N",mydata$SNP[4],"P value",mydata$P_value[4]),size=4)+
+  
+  geom_curve(aes(x = mydata$LCI[5], y = 5, xend = mydata$UCI[5], yend = 5),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[5],y= 5 , label=paste(mydata$Items[5],"N",mydata$SNP[5],"P value",mydata$P_value[5]),size=4)+
+  geom_curve(aes(x = mydata$LCI[6], y = 6, xend = mydata$UCI[6], yend = 6),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[6],y= 6 , label=paste(mydata$Items[6],"N",mydata$SNP[6],"P value",mydata$P_value[6]),size=4)+
+  geom_curve(aes(x = mydata$LCI[7], y = 7, xend = mydata$UCI[7], yend = 7),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[7],y= 7 , label=paste(mydata$Items[7],"N",mydata$SNP[7],"P value",mydata$P_value[7]),size=4)+
+  geom_curve(aes(x = mydata$LCI[8], y = 8, xend = mydata$UCI[8], yend = 8),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[8],y= 8 , label=paste(mydata$Items[8],"N",mydata$SNP[8],"P value",mydata$P_value[8]),size=4)+
+  
+  geom_curve(aes(x = mydata$LCI[9], y = 9, xend = mydata$UCI[9], yend = 9),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[9],y= 9 , label=paste(mydata$Items[9],"N",mydata$SNP[9],"P value",mydata$P_value[9]),size=4)+
+  geom_curve(aes(x = mydata$LCI[10], y = 10, xend = mydata$UCI[10], yend = 10),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[10],y= 10 , label=paste(mydata$Items[10],"N",mydata$SNP[10],"P value",mydata$P_value[10]),size=4)+
+  geom_curve(aes(x = mydata$LCI[11], y = 11, xend = mydata$UCI[11], yend = 11),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[11],y= 11 , label=paste(mydata$Items[11],"N",mydata$SNP[11],"P value",mydata$P_value[11]),size=4)+
+  geom_curve(aes(x = mydata$LCI[12], y = 12, xend = mydata$UCI[12], yend = 12),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[12],y= 12 , label=paste(mydata$Items[12],"N",mydata$SNP[12],"P value",mydata$P_value[12]),size=4)+
+  geom_curve(aes(x = mydata$LCI[13], y = 13, xend = mydata$UCI[13], yend = 13),
+             arrow = arrow(length = unit(0.02, "npc"), type="closed"),
+             colour = "#0CB9C1", size = 0.5, angle = 0)+
+  annotate("text",x= mydata$OR[13],y= 13 , label=paste(mydata$Items[13],"N",mydata$SNP[13],"P value",mydata$P_value[13]),size=4)
+p3 
+
+MinMax= function(data){
+  data_new <- data
+  for(i  in 1:dim(data)[2]){
+    data_new[,i] <-(data[,i]-min(data[,i],na.rm = T))/(max(data[,i],na.rm = T)-min(data[,i],na.rm = T))#将数据缩放至0-1区间
+    
+  }
+  return (data_new)
+}
+for(i in realvars){
+  data_a <-append( data_a,mean(data_aa[,i]))
+  data_b <-append( data_b,mean(data_bb[,i]))
+  data_d <-append( data_d,mean(data_aa[,i])-mean(data_bb[,i]))
+}
+
+dataPlot <- data.table(variable  = realvars,
+                       data_a,
+                       data_b,
+                       data_d
+)
+colnames(dataPlot) <- c("variable","a","b","d")
+dataPlotMelt <- melt(data          = dataPlot,
+                     id.vars       = c("variable"),
+                     variable.name = "Clusters",
+                     value.name    = "value")
+setorder(dataPlot,d)
+varNames <- as.character(dataPlot$variable)
+
+dataPlotMelt$variable <- factor(dataPlotMelt$variable,
+                                levels = varNames)
+dataPlotMelt <-dataPlotMelt[dataPlotMelt$Clusters=='a' | dataPlotMelt$Clusters=='b', ]
+ggplot(data = dataPlotMelt, mapping = aes(x= variable, y = value,group = Clusters,fill=Clusters,color=Clusters))+  geom_bar(position=position_dodge(0.7),width=0.5,stat="identity" )+
+  scale_fill_manual(values =alpha(c("#0CB9C1","#F85A40"),0.7 )) +
+  scale_color_manual(values =c("#0CB9C1","#F85A40" )) +
+  theme_bw() + 
+  theme(panel.grid.major=element_line(colour=NA),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        panel.grid.minor = element_blank())+scale_y_continuous(expand = c(0, 0))+
+  geom_smooth(method = 'loess',se=F,span = 0.99)+ theme(axis.text.x = element_text(angle = 90, hjust = 1))
+##........省略重复步骤
+data <- read.csv ("patient.csv",encoding="UTF-8",header = TRUE)
+roc_inspare_i<-roc( data$death_28day,data$troponin_i)
+roc_inspare_type<-roc( data$death_28day,data$exp_type)
+plot(roc_inspare_i,print.auc=TRUE,plot=TRUE,
+     print.thres=TRUE,col='#ffadd6',xlim=c(1,0),ylim=c(0,1),grid=FALSE,add=F)
+plot(roc_inspare_type,print.auc=TRUE,plot=TRUE,
+     print.thres=TRUE,col='#F85A40',xlim=c(1,0),ylim=c(0,1),grid=FALSE,add=TRUE)
+##........省略重复步骤
+library(tableone)
+library(survival)
+library(grid)
+library(Matching)
+## Weighted analysis
+library(survey)
+library(reshape2)
+library(ggplot2)
+library(data.table)
+library(sqldf)
+##每次运行一组
+patient <- read.csv ("patient-mimic3-mice.csv",encoding="UTF-8",header = TRUE)
+mimic3s<- read.csv ("icustays3s.csv",encoding="UTF-8",header = TRUE)
+patient <- sqldf('select * from patient where icustay_id in (select icustay_id from mimic3s)')
+daily <- read.csv ("daily-mimic3-mice-day1.csv",encoding="UTF-8",header = TRUE) 
+mimic3s<- read.csv ("icustays3s.csv",encoding="UTF-8",header = TRUE)
+daily <- sqldf('select * from daily where icustay_id in (select icustay_id from mimic3s)')
+tropT <- sqldf("select p.*,heart_rate_twa,resp_rate_twa,sbp_twa,dbp_twa,temperature_twa,spo2_twa,uo,rrt,vent,vaso
+              from patient p left join daily d on p.icustay_id=d.icustay_id and day=1")
+tropT <- tropT[tropT$exp_type==0 | tropT$exp_type==5 , ]
+tropT$class <- ifelse(tropT$exp_type>0,1,0) 
+vars <-c( "age", "male","bmi","sofa","sapsii",
+          "ph_min" ,"po2_min" ,"pco2_max" ,"lactate_max" ,"wbc_max", "hb_min" ,"plt_min","creatinine_max","inr_max", "uo", "vaso", "rrt","vent" )
+catvars <-c( "male",  "vaso", "rrt","vent"      )  #指定分类变量
+tabUnmatched <- CreateTableOne(vars = vars, strata = "class", data = tropT, test = FALSE)
+print(tabUnmatched, smd = TRUE)
+psModel <- glm( formula=class~age+ male+bmi+sofa+sapsii+
+                  ph_min +po2_min +pco2_max +lactate_max +wbc_max+ hb_min +plt_min+creatinine_max+inr_max+
+                  uo  +vaso+rrt+vent,
+                family  = binomial(link = "logit"),
+                data    = tropT)
+tropT$ptropT <- predict(psModel, type = "response")
+tropT$pNotropT <- 1 - tropT$ptropT
+tropT$pAssign <- NA
+tropT$pAssign[tropT$class == 1]    <- tropT$ptropT[tropT$class == 1]
+tropT$pAssign[tropT$class == 0] <- tropT$pNotropT[tropT$class == 0]
+tropT$pMin <- pmin(tropT$ptropT, tropT$pNotropT)
+listMatch <- Match(Tr       = (tropT$class == 1),    
+                   X        = log(tropT$ptropT / tropT$pNotropT),
+                   M        = 1,
+                   caliper  = 0.2,
+                   replace  = F,
+                   ties     = TRUE,
+                   version  = "fast")
+mb <- MatchBalance(psModel$formula, data=tropT, match.out=listMatch, nboots=50)
+summary(mb)
+tropTMatched <- tropT[unlist(listMatch[c("index.treated","index.control")]), ]
+tabMatched <- CreateTableOne(vars = vars, strata = "class", data = tropTMatched, test = T)
+tropT$mw <- tropT$pMin / tropT$pAssign
+tropT$mw1=ifelse(tropT$class==1,1/(tropT$ptropT),1/(1-tropT$ptropT))
+tropTSvy <- svydesign(ids = ~ 1, data = tropT, weights = ~ mw)
+print(tropTSvy)
+tabWeighted <-svyCreateTableOne(vars = vars, strata = "class", data = tropTSvy, factorVars=catvars, 
+                                smd = TRUE
+)
+dataPlot <- data.table(variable  = rownames(ExtractSmd(tabUnmatched)),
+                       Unmatched = ExtractSmd(tabUnmatched),
+                       Matched   = ExtractSmd(tabMatched),
+                       Weighted  = ExtractSmd(tabWeighted))
+dataPlot$variable <-c( "Age", "Male","BMI","SOFA","SAPS II",
+                       "pH" ,"PO2" ,"PCO2" ,"Lactate" ,"WBC", "Hemoglobin" ,"Platelet","Serum Creatinine","INR" ,"Urine output" ,"Vasopressor" ,"RRT","Mechanical ventilation")
+colnames(dataPlot) <- c("variable","Unmatched","Matched","Weighted")
+dataPlotMelt <- melt(data          = dataPlot,
+                     id.vars       = c("variable"),
+                     variable.name = "Method",
+                     value.name    = "SMD")
+varNames <- as.character(dataPlot$variable)[order(dataPlot$Unmatched)]
+dataPlotMelt$variable <- factor(dataPlotMelt$variable,
+                                levels = varNames)
+ggplot(data = dataPlotMelt, mapping = aes(x = variable, y = SMD,
+                                          group = Method, color = Method)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0.1, color = "black", size = 0.1) +
+  coord_flip() +scale_color_manual(values = c('#F85A40','#037EF3','#0CB9C1') )+
+  theme_bw() + theme(legend.key = element_blank())
+
+print(tabMatched,  nonnormal = TRUE, exact = "extent",smd = TRUE)
+print(tabWeighted,  nonnormal = TRUE, exact = "extent",smd = TRUE)
+glmUnmatched <- coxph(Surv(sur_28day,death_28day)  ~ class,
+                      data    = tropT)
+glmMatched <- coxph(Surv(sur_28day,death_28day)  ~ class,
+                    data    = tropTMatched)
+glmWeighted <- svycoxph(Surv(sur_28day,death_28day)  ~ class,
+                        design    = tropTSvy)
+resTogether <- list(Unmatched = ShowRegTable(glmUnmatched, printToggle = FALSE),
+                    Matched   = ShowRegTable(glmMatched, printToggle = FALSE),
+                    Weighted  = ShowRegTable(glmWeighted, printToggle = FALSE))
+print(resTogether, quote = FALSE)
+resTogether <- list(Unmatched = ShowRegTable(glmUnmatched, printToggle = FALSE))
+print(resTogether, quote = FALSE)
+
+
